@@ -2,7 +2,6 @@
 
 Instalación completa de un registry privado seguro (Harbor) sobre un cluster de Kubernetes construido con `kubeadm`, en Rocky Linux 9.7, automatizado con Ansible.
 
-> 📸 Los espacios marcados como `![Descripción](screenshots/nombre.png)` son donde debes insertar tus propias capturas de pantalla.
 
 ---
 
