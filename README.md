@@ -29,8 +29,6 @@ flowchart TD
 
 **Red:** los tres nodos viven en una red host-only (`192.168.56.0/24`). MetalLB reparte un rango propio de esa misma red (`192.168.56.200-210`) para exponer Harbor con una IP fija y accesible, sin depender de un proveedor de nube. La confianza TLS se resuelve con una **CA propia de laboratorio**, creada con cert-manager, distribuida a los tres nodos.
 
-![Diagrama de arquitectura completo](docs/images/arquitectura.png)
-*(Sustituye esta imagen por tu propio diagrama o captura si quieres una versión adicional a la de arriba)*
 
 ## Prerrequisitos
 
