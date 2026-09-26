@@ -1,0 +1,144 @@
+---
+- name: Certificados de Harbor (CA propia + cert firmado)
+  hosts: control_plane
+  become: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+
+  tasks:
+    - name: Namespace de Harbor
+      ansible.builtin.command: kubectl create namespace {{ harbor_namespace }}
+      register: ns_create
+      failed_when: ns_create.rc != 0 and 'AlreadyExists' not in ns_create.stderr
+      changed_when: ns_create.rc == 0
+
+    - name: Manifiesto de certificados
+      ansible.builtin.copy:
+        dest: /tmp/harbor-certificates.yaml
+        mode: "0644"
+        content: |
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: selfsigned-issuer
+          spec:
+            selfSigned: {}
+          ---
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: lab-ca
+            namespace: cert-manager
+          spec:
+            isCA: true
+            commonName: lab-ca
+            secretName: lab-ca-secret
+            duration: 43800h
+            privateKey:
+              algorithm: ECDSA
+              size: 256
+            issuerRef:
+              name: selfsigned-issuer
+              kind: ClusterIssuer
+          ---
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: lab-ca-issuer
+          spec:
+            ca:
+              secretName: lab-ca-secret
+          ---
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: harbor-tls
+            namespace: {{ harbor_namespace }}
+          spec:
+            secretName: harbor-tls
+            duration: 2160h
+            renewBefore: 360h
+            commonName: {{ harbor_domain }}
+            dnsNames:
+              - {{ harbor_domain }}
+            ipAddresses:
+              - {{ harbor_lb_ip }}
+            privateKey:
+              algorithm: RSA
+              size: 2048
+            issuerRef:
+              name: lab-ca-issuer
+              kind: ClusterIssuer
+
+    - name: Aplicar los certificados
+      ansible.builtin.command: kubectl apply -f /tmp/harbor-certificates.yaml
+      register: certs_apply
+      changed_when: "'unchanged' not in certs_apply.stdout"
+
+    - name: Esperar a que la CA quede lista
+      ansible.builtin.command: >
+        kubectl -n cert-manager wait --for=condition=Ready
+        certificate/lab-ca --timeout=120s
+      changed_when: false
+
+    - name: Esperar a que el certificado de Harbor quede listo
+      ansible.builtin.command: >
+        kubectl -n {{ harbor_namespace }} wait --for=condition=Ready
+        certificate/harbor-tls --timeout=120s
+      changed_when: false
+
+    - name: Secretos de Harbor (admin password y secretKey)
+      ansible.builtin.shell: |
+        kubectl -n {{ harbor_namespace }} create secret generic harbor-admin \
+          --from-literal=HARBOR_ADMIN_PASSWORD='{{ harbor_admin_password }}' \
+          --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n {{ harbor_namespace }} create secret generic harbor-secretkey \
+          --from-literal=secretKey='{{ harbor_secret_key }}' \
+          --dry-run=client -o yaml | kubectl apply -f -
+      no_log: true
+      changed_when: false
+
+    - name: Repo de Helm para Harbor
+      ansible.builtin.command: helm repo add harbor https://helm.goharbor.io
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      register: repo_add_harbor
+      changed_when: "'has been added' in repo_add_harbor.stdout"
+
+    - name: Actualizar repos de Helm
+      ansible.builtin.command: helm repo update
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      changed_when: false
+
+    - name: Copiar values.yaml al control plane
+      ansible.builtin.copy:
+        src: harbor-values.yaml
+        dest: /tmp/harbor-values.yaml
+        mode: "0644"
+
+    - name: Instalar Harbor
+      ansible.builtin.command: >
+        helm upgrade --install harbor harbor/harbor
+        -n {{ harbor_namespace }}
+        -f /tmp/harbor-values.yaml
+        --wait --timeout 15m
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      register: harbor_install
+      changed_when: "'has been upgraded' in harbor_install.stdout or 'has been installed' in harbor_install.stdout"
+
+    - name: Extraer la CA del laboratorio
+      ansible.builtin.shell: >
+        kubectl -n cert-manager get secret lab-ca-secret
+        -o jsonpath='{.data.ca\.crt}' | base64 -d
+      register: lab_ca_cert
+      changed_when: false
+
+    - name: Guardar la CA localmente (en el control de Ansible)
+      ansible.builtin.copy:
+        content: "{{ lab_ca_cert.stdout }}\n"
+        dest: "{{ playbook_dir }}/files/lab-ca.crt"
+        mode: "0644"
+      delegate_to: localhost
+      become: false

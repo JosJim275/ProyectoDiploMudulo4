@@ -1,0 +1,96 @@
+expose:
+  type: loadBalancer
+  tls:
+    enabled: true
+    certSource: secret
+    secret:
+      secretName: harbor-tls
+  loadBalancer:
+    name: harbor
+    IP: ""
+    ports:
+      httpPort: 80
+      httpsPort: 443
+
+externalURL: https://harbor.lab.local
+
+existingSecretAdminPassword: harbor-admin
+existingSecretAdminPasswordKey: HARBOR_ADMIN_PASSWORD
+existingSecretSecretKey: harbor-secretkey
+
+persistence:
+  enabled: true
+  resourcePolicy: keep
+  persistentVolumeClaim:
+    registry:
+      storageClass: ""
+      size: 10Gi
+    jobservice:
+      jobLog:
+        storageClass: ""
+        size: 1Gi
+    database:
+      storageClass: ""
+      size: 2Gi
+    redis:
+      storageClass: ""
+      size: 1Gi
+    trivy:
+      storageClass: ""
+      size: 5Gi
+
+nginx:
+  replicas: 1
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits:   {cpu: 250m, memory: 128Mi}
+
+portal:
+  replicas: 1
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits:   {cpu: 250m, memory: 128Mi}
+
+core:
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits:   {cpu: 500m, memory: 512Mi}
+
+jobservice:
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits:   {cpu: 300m, memory: 512Mi}
+
+registry:
+  replicas: 1
+  registry:
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits:   {cpu: 300m, memory: 512Mi}
+  controller:
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits:   {cpu: 200m, memory: 256Mi}
+
+database:
+  type: internal
+  internal:
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits:   {cpu: 500m, memory: 512Mi}
+
+redis:
+  type: internal
+  internal:
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits:   {cpu: 200m, memory: 256Mi}
+
+trivy:
+  enabled: true
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits:   {cpu: 500m, memory: 512Mi}

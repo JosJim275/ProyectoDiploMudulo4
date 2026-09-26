@@ -1,0 +1,134 @@
+---
+- name: kubeadm init en el control plane
+  hosts: control_plane
+  become: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+
+  tasks:
+    - name: kubeadm init
+      ansible.builtin.command: >
+        kubeadm init
+        --apiserver-advertise-address={{ ansible_host }}
+        --pod-network-cidr={{ pod_cidr }}
+      args:
+        creates: /etc/kubernetes/admin.conf
+      register: kubeadm_init
+
+    - name: Mostrar la salida de kubeadm init
+      ansible.builtin.debug:
+        var: kubeadm_init.stdout_lines
+      when: kubeadm_init.changed
+
+    - name: Directorio ~/.kube del usuario
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: directory
+        owner: "{{ ansible_user }}"
+        mode: "0700"
+
+    - name: Copiar kubeconfig para el usuario ansible
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "/home/{{ ansible_user }}/.kube/config"
+        remote_src: true
+        owner: "{{ ansible_user }}"
+        mode: "0600"
+
+    - name: ¿Ya está aplicado el recurso Installation de Calico?
+      ansible.builtin.command: kubectl get installation.operator.tigera.io default
+      register: calico_ns
+      failed_when: false
+      changed_when: false
+
+    - name: Instalar el operador de Calico
+      ansible.builtin.command: >
+        kubectl apply --server-side -f
+        https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml
+      when: calico_ns.rc != 0
+
+    - name: Descargar custom-resources.yaml de Calico
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/custom-resources.yaml"
+        dest: /tmp/calico-custom-resources.yaml
+        mode: "0644"
+      when: calico_ns.rc != 0
+
+    - name: Ajustar custom-resources.yaml a nuestro pod_cidr
+      ansible.builtin.replace:
+        path: /tmp/calico-custom-resources.yaml
+        regexp: '192\.168\.0\.0/16'
+        replace: "{{ pod_cidr }}"
+      when: calico_ns.rc != 0
+
+    - name: Esperar a que el operador registre sus CRDs
+      ansible.builtin.command: kubectl get crd installations.operator.tigera.io
+      register: crd_check
+      until: crd_check.rc == 0
+      retries: 30
+      delay: 5
+      changed_when: false
+      when: calico_ns.rc != 0
+
+
+    - name: Aplicar custom-resources.yaml
+      ansible.builtin.command: kubectl apply -f /tmp/calico-custom-resources.yaml
+      when: calico_ns.rc != 0
+
+    - name: Esperar a que los nodos queden Ready (máx. 5 min)
+      ansible.builtin.shell: "kubectl get nodes --no-headers | grep -vc ' Ready ' || true"
+      register: not_ready
+      until: not_ready.stdout | trim == "0"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Estado final de los nodos
+      ansible.builtin.command: kubectl get nodes -o wide
+      register: nodes_out
+      changed_when: false
+
+    - ansible.builtin.debug:
+        var: nodes_out.stdout_lines
+
+- name: Generar el comando de unión
+  hosts: control_plane
+  become: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    - name: kubeadm token create --print-join-command
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join_cmd
+      changed_when: false
+
+- name: Unir los workers
+  hosts: workers
+  become: true
+  tasks:
+    - name: kubeadm join
+      ansible.builtin.command: "{{ hostvars[groups['control_plane'][0]].join_cmd.stdout }}"
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+
+- name: Confirmar que todos los nodos están Ready
+  hosts: control_plane
+  become: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    - name: Esperar a que todos los nodos queden Ready (máx. 5 min)
+      ansible.builtin.shell: "kubectl get nodes --no-headers | grep -vc ' Ready ' || true"
+      register: all_ready
+      until: all_ready.stdout | trim == "0"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Estado final del cluster completo
+      ansible.builtin.command: kubectl get nodes -o wide
+      register: final_nodes
+      changed_when: false
+
+    - ansible.builtin.debug:
+        var: final_nodes.stdout_lines

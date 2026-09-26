@@ -1,0 +1,54 @@
+---
+# Dominio y IP que tendrá Harbor (la IP la dará MetalLB más adelante)
+harbor_domain: harbor.lab.local
+harbor_lb_ip: 192.168.56.200
+
+# SELinux: permissive en laboratorio. DOCUMENTA esta decisión en docs/iso27001.md
+selinux_state: permissive
+
+# ---- Redes del cluster (no deben solaparse con la red de los nodos) ----
+pod_cidr: "10.244.0.0/16"
+service_cidr: "10.96.0.0/12"
+
+# ---- Firewall ----
+configure_firewall: true   # false = apaga firewalld (solo laboratorio, documéntalo)
+
+fw_ports_all:              # puertos en TODOS los nodos
+  - 10250/tcp              # kubelet
+  - 10256/tcp              # kube-proxy
+  - 30000-32767/tcp        # NodePorts
+  - 179/tcp                # Calico (BGP)
+  - 4789/udp               # Calico (VXLAN, túnel entre nodos)
+  - 5473/tcp               # Calico (Typha)
+  - 7946/tcp               # MetalLB
+  - 7946/udp
+  - 80/tcp                 # Harbor
+  - 443/tcp
+
+fw_ports_cp:               # puertos solo en el control plane
+  - 6443/tcp               # API server
+  - 2379-2380/tcp          # etcd
+  - 10257/tcp              # controller-manager
+  - 10259/tcp              # scheduler
+
+# ---- Versión de Kubernetes (VERIFÍCALA en https://kubernetes.io/releases/) ----
+k8s_minor: "v1.34"
+
+# Ruta del kubeconfig de administrador en el control plane
+kubeconfig: /etc/kubernetes/admin.conf
+
+# Verifica la versión vigente en https://github.com/projectcalico/calico/releases
+calico_version: "v3.30.3"
+
+# Verifica la versión vigente en https://github.com/rancher/local-path-provisioner/releases
+local_path_version: "v0.0.31"
+
+# Rango de IPs para MetalLB (debe estar libre, fuera del DHCP de VirtualBox)
+metallb_range: "192.168.56.200-192.168.56.210"
+
+# Red de las VMs (host-only de VirtualBox): necesaria porque el tráfico
+# host-a-pod sale con la IP real del nodo, no con una IP de pod_cidr.
+node_cidr: "192.168.56.0/24"
+
+# ---- Harbor ----
+harbor_namespace: harbor

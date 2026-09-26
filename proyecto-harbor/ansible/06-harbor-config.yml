@@ -1,0 +1,290 @@
+---
+- name: Configurar proyectos, usuarios y políticas de Harbor
+  hosts: control_plane
+  become: false
+  vars:
+    harbor_api: "https://{{ harbor_domain }}/api/v2.0"
+
+  tasks:
+    - name: Crear proyecto desarrollo
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          project_name: desarrollo
+          metadata:
+            public: "false"
+            auto_scan: "true"
+            prevent_vul: "false"
+            severity: "high"
+        status_code: [201, 409]
+
+    - name: Crear proyecto staging
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          project_name: staging
+          metadata:
+            public: "false"
+            auto_scan: "true"
+            prevent_vul: "true"
+            severity: "high"
+        status_code: [201, 409]
+
+    - name: Crear proyecto produccion
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          project_name: produccion
+          metadata:
+            public: "false"
+            auto_scan: "true"
+            prevent_vul: "true"
+            severity: "high"
+        status_code: [201, 409]
+
+    - name: Crear usuario dev1
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/users"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          username: dev1
+          email: dev1@lab.local
+          realname: Developer Uno
+          password: "{{ dev1_password }}"
+        status_code: [201, 409]
+
+    - name: Crear usuario ops1
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/users"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          username: ops1
+          email: ops1@lab.local
+          realname: Operaciones Uno
+          password: "{{ ops1_password }}"
+        status_code: [201, 409]
+
+    - name: Crear usuario auditor1
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/users"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          username: auditor1
+          email: auditor1@lab.local
+          realname: Auditor Uno
+          password: "{{ auditor1_password }}"
+        status_code: [201, 409]
+
+    - name: Obtener lista de proyectos
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects"
+        method: GET
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        return_content: true
+      register: projects_list
+
+    - name: Asignar dev1 como Developer en desarrollo
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects/desarrollo/members"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          role_id: 2
+          member_user:
+            username: dev1
+        status_code: [201, 409, 500]
+
+    - name: Asignar dev1 como Developer en staging
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects/staging/members"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          role_id: 2
+          member_user:
+            username: dev1
+        status_code: [201, 409, 500]
+
+    - name: Asignar dev1 como Guest en produccion
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects/produccion/members"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          role_id: 3
+          member_user:
+            username: dev1
+        status_code: [201, 409, 500]
+
+    - name: Asignar ops1 como Maintainer en staging
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects/staging/members"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          role_id: 4
+          member_user:
+            username: ops1
+        status_code: [201, 409, 500]
+
+    - name: Asignar ops1 como Maintainer en produccion
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects/produccion/members"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          role_id: 4
+          member_user:
+            username: ops1
+        status_code: [201, 409, 500]
+
+    - name: Asignar auditor1 como Guest en los tres proyectos
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects/{{ item }}/members"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          role_id: 3
+          member_user:
+            username: auditor1
+        status_code: [201, 409, 500]
+      loop:
+        - desarrollo
+        - staging
+        - produccion
+
+    - name: Robot account ci-push (push+pull en desarrollo)
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/robots"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: ci-push
+          duration: 30
+          level: project
+          disable: false
+          description: "Robot para simular push desde un pipeline"
+          permissions:
+            - kind: project
+              namespace: desarrollo
+              access:
+                - resource: repository
+                  action: push
+                - resource: repository
+                  action: pull
+        status_code: [201, 409]
+        return_content: true
+      register: robot_ci_push
+
+    - name: Robot account k8s-pull (solo pull en produccion)
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/robots"
+        method: POST
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: k8s-pull
+          duration: 30
+          level: project
+          disable: false
+          description: "Robot para que Kubernetes descargue imagenes de produccion"
+          permissions:
+            - kind: project
+              namespace: produccion
+              access:
+                - resource: repository
+                  action: pull
+        status_code: [201, 409]
+        return_content: true
+      register: robot_k8s_pull
+
+    - name: Directorio para guardar credenciales de robots
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/secrets"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Guardar credenciales de ci-push
+      ansible.builtin.copy:
+        content: "{{ robot_ci_push.content }}"
+        dest: "{{ playbook_dir }}/secrets/robot-ci-push.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: robot_ci_push.status == 201
+
+    - name: Guardar credenciales de k8s-pull
+      ansible.builtin.copy:
+        content: "{{ robot_k8s_pull.content }}"
+        dest: "{{ playbook_dir }}/secrets/robot-k8s-pull.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: robot_k8s_pull.status == 201
+
+    - name: Exigir firma Cosign en produccion
+      ansible.builtin.uri:
+        url: "{{ harbor_api }}/projects/produccion"
+        method: PUT
+        user: admin
+        password: "{{ harbor_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          metadata:
+            enable_content_trust_cosign: "true"
+        status_code: [200, 409]

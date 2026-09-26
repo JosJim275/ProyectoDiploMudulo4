@@ -1,0 +1,227 @@
+---
+- name: Preparar nodos Rocky Linux 9 para Kubernetes
+  hosts: k8s
+  become: true
+
+  tasks:
+    - name: Hostname igual al nombre del inventario
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Resolución de nombres entre nodos y Harbor
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE K8S"
+        block: |
+          {% for h in groups['k8s'] %}
+          {{ hostvars[h].ansible_host }} {{ h }}
+          {% endfor %}
+          {{ harbor_lb_ip }} {{ harbor_domain }}
+
+    - name: Paquetes base
+      ansible.builtin.dnf:
+        name:
+          - chrony
+          - iproute-tc
+          - container-selinux
+        state: present
+
+    - name: chronyd activo y habilitado
+      ansible.builtin.service:
+        name: chronyd
+        state: started
+        enabled: true
+
+    # ---------------- Kernel ----------------
+    - name: Desactivar swap ahora
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+
+    - name: Desactivar swap de forma permanente
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#\n].*\sswap\s.*)$'
+        replace: '# \1'
+
+    - name: Módulos de kernel al arrancar
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        mode: "0644"
+        content: |
+          overlay
+          br_netfilter
+
+    - name: Cargar módulos ahora
+      ansible.builtin.command: "modprobe {{ item }}"
+      loop:
+        - overlay
+        - br_netfilter
+      changed_when: false
+
+    - name: Parámetros sysctl para Kubernetes
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: "1"
+        sysctl_file: /etc/sysctl.d/99-k8s.conf
+        reload: true
+        state: present
+      loop:
+        - net.bridge.bridge-nf-call-iptables
+        - net.bridge.bridge-nf-call-ip6tables
+        - net.ipv4.ip_forward
+
+    - name: SELinux
+      ansible.posix.selinux:
+        policy: targeted
+        state: "{{ selinux_state }}"
+
+    # ---------------- Firewall ----------------
+    - name: Firewalld con los puertos de Kubernetes
+      when: configure_firewall
+      block:
+        - name: firewalld instalado
+          ansible.builtin.dnf:
+            name: firewalld
+            state: present
+
+        - name: firewalld activo y habilitado
+          ansible.builtin.service:
+            name: firewalld
+            state: started
+            enabled: true
+
+        - name: Puertos comunes a todos los nodos
+          ansible.posix.firewalld:
+            port: "{{ item }}"
+            permanent: true
+            immediate: true
+            state: enabled
+          loop: "{{ fw_ports_all }}"
+
+        - name: Puertos del control plane
+          ansible.posix.firewalld:
+            port: "{{ item }}"
+            permanent: true
+            immediate: true
+            state: enabled
+          loop: "{{ fw_ports_cp }}"
+          when: "'control_plane' in group_names"
+
+        - name: Masquerade (los pods salen a internet)
+          ansible.posix.firewalld:
+            masquerade: true
+            zone: public
+            permanent: true
+            immediate: true
+            state: enabled
+
+        - name: Redes de pods, services y nodos como zona confiable
+          ansible.posix.firewalld:
+            source: "{{ item }}"
+            zone: trusted
+            permanent: true
+            immediate: true
+            state: enabled
+          loop:
+            - "{{ pod_cidr }}"
+            - "{{ service_cidr }}"
+            - "{{ node_cidr }}"
+
+    - name: Sin firewalld (solo laboratorio)
+      when: not configure_firewall
+      ansible.builtin.service:
+        name: firewalld
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    # ---------------- containerd ----------------
+    - name: Repo de Docker CE (solo para obtener containerd.io)
+      ansible.builtin.yum_repository:
+        name: docker-ce-stable
+        description: Docker CE Stable
+        baseurl: "https://download.docker.com/linux/centos/$releasever/$basearch/stable"
+        gpgcheck: true
+        gpgkey: https://download.docker.com/linux/centos/gpg
+
+    - name: Instalar containerd
+      ansible.builtin.dnf:
+        name: containerd.io
+        state: present
+
+    - name: Generar la configuración por defecto (una sola vez)
+      ansible.builtin.shell: |
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+        touch /etc/containerd/.config-generated
+      args:
+        creates: /etc/containerd/.config-generated
+      notify: restart containerd
+
+    - name: SystemdCgroup = true
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      notify: restart containerd
+
+    - name: Habilitar certs.d (para la CA de Harbor)
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: "^(\\s*)config_path = ['\"]{2}"
+        replace: '\1config_path = "/etc/containerd/certs.d"'
+      notify: restart containerd
+
+    - name: Directorio certs.d
+      ansible.builtin.file:
+        path: /etc/containerd/certs.d
+        state: directory
+        mode: "0755"
+
+    - name: containerd activo y habilitado
+      ansible.builtin.service:
+        name: containerd
+        state: started
+        enabled: true
+
+    # ---------------- Kubernetes ----------------
+    - name: Repo de Kubernetes
+      ansible.builtin.yum_repository:
+        name: kubernetes
+        description: Kubernetes
+        baseurl: "https://pkgs.k8s.io/core:/stable:/{{ k8s_minor }}/rpm/"
+        gpgcheck: true
+        gpgkey: "https://pkgs.k8s.io/core:/stable:/{{ k8s_minor }}/rpm/repodata/repomd.xml.key"
+        exclude:
+          - kubelet
+          - kubeadm
+          - kubectl
+          - cri-tools
+          - kubernetes-cni
+
+    - name: Instalar kubelet, kubeadm y kubectl
+      ansible.builtin.dnf:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        disable_excludes: kubernetes
+
+    - name: kubelet usa la IP host-only (VirtualBox)
+      ansible.builtin.copy:
+        dest: /etc/sysconfig/kubelet
+        mode: "0644"
+        content: |
+          KUBELET_EXTRA_ARGS=--node-ip={{ ansible_host }}
+
+    - name: kubelet habilitado (arranca solo después de kubeadm)
+      ansible.builtin.service:
+        name: kubelet
+        enabled: true
+
+  handlers:
+    - name: restart containerd
+      ansible.builtin.service:
+        name: containerd
+        state: restarted

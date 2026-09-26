@@ -1,0 +1,142 @@
+---
+- name: Addons base del cluster (Helm, storage, MetalLB, cert-manager)
+  hosts: control_plane
+  become: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+
+  tasks:
+    - name: Paquetes necesarios para Helm
+      ansible.builtin.dnf:
+        name: tar
+        state: present
+
+    - name: Instalar Helm
+      ansible.builtin.shell: |
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      failed_when: false
+
+    - name: Confirmar que Helm quedó instalado
+      ansible.builtin.stat:
+        path: /usr/local/bin/helm
+      register: helm_bin
+      failed_when: not helm_bin.stat.exists
+
+
+    - name: local-path-provisioner
+      ansible.builtin.command: >
+        kubectl apply -f
+        https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ local_path_version }}/deploy/local-path-storage.yaml
+      register: local_path_apply
+      changed_when: "'unchanged' not in local_path_apply.stdout"
+
+    - name: local-path como StorageClass por defecto
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - patch
+          - storageclass
+          - local-path
+          - -p
+          - '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+      register: patch_result
+      changed_when: "'no change' not in patch_result.stdout"
+
+    - name: Repo de Helm para MetalLB
+      ansible.builtin.command: helm repo add metallb https://metallb.github.io/metallb
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      register: repo_add
+      changed_when: "'has been added' in repo_add.stdout"
+
+    - name: Actualizar repos de Helm
+      ansible.builtin.command: helm repo update
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      changed_when: false
+
+    - name: Instalar MetalLB
+      ansible.builtin.command: >
+        helm upgrade --install metallb metallb/metallb
+        -n metallb-system --create-namespace --wait --timeout 5m
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      register: metallb_install
+      changed_when: "'has been upgraded' in metallb_install.stdout or 'has been installed' in metallb_install.stdout"
+
+    - name: Manifiesto del pool de IPs
+      ansible.builtin.copy:
+        dest: /tmp/metallb-pool.yaml
+        mode: "0644"
+        content: |
+          apiVersion: metallb.io/v1beta1
+          kind: IPAddressPool
+          metadata:
+            name: lab-pool
+            namespace: metallb-system
+          spec:
+            addresses:
+              - {{ metallb_range }}
+          ---
+          apiVersion: metallb.io/v1beta1
+          kind: L2Advertisement
+          metadata:
+            name: lab-l2
+            namespace: metallb-system
+          spec:
+            ipAddressPools:
+              - lab-pool
+
+    - name: Esperar a que el controller de MetalLB esté listo
+      ansible.builtin.command: >
+        kubectl wait --for=condition=Ready pod
+        -n metallb-system -l app.kubernetes.io/component=controller
+        --timeout=120s
+      changed_when: false
+
+    - name: Aplicar el pool (reintenta hasta que el webhook responda)
+      ansible.builtin.command: kubectl apply -f /tmp/metallb-pool.yaml
+      register: pool_apply
+      until: pool_apply.rc == 0
+      retries: 15
+      delay: 10
+      changed_when: "'unchanged' not in pool_apply.stdout"
+
+
+    - name: Repo de Helm para cert-manager (Jetstack)
+      ansible.builtin.command: helm repo add jetstack https://charts.jetstack.io
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      register: repo_add_cm
+      changed_when: "'has been added' in repo_add_cm.stdout"
+
+    - name: Actualizar repos de Helm
+      ansible.builtin.command: helm repo update
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      changed_when: false
+
+    - name: Instalar cert-manager
+      ansible.builtin.command: >
+        helm upgrade --install cert-manager jetstack/cert-manager
+        -n cert-manager --create-namespace
+        --set crds.enabled=true
+        --wait --timeout 5m
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      register: cm_install
+      changed_when: "'has been upgraded' in cm_install.stdout or 'has been installed' in cm_install.stdout"
+
+    - name: Versiones instaladas (evidencia para la exposición)
+      ansible.builtin.command: helm list -A
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      register: helm_list
+      changed_when: false
+
+    - ansible.builtin.debug:
+        var: helm_list.stdout_lines

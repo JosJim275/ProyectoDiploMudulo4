@@ -1,0 +1,186 @@
+================================================================
+ DEMO EN VIVO — HARBOR SOBRE KUBERNETES
+ Guion de comandos, copiar y pegar en orden
+================================================================
+
+QUE VA A PASAR EN ESTA DEMO (léelo antes de empezar):
+Vamos a demostrar, en el cluster real (no grabado, no simulado),
+que Harbor bloquea activamente imágenes inseguras y acepta las que
+cumplen la política. Se muestran dos casos de éxito y dos de falla:
+
+  1) Una imagen con vulnerabilidades se sube sin problema (éxito),
+     pero se bloquea al intentar descargarla en un entorno estricto
+     (falla intencional = la política funcionando).
+  2) La misma imagen SI se puede descargar desde un entorno menos
+     estricto (éxito), probando que la separación de entornos es real.
+  3) Una imagen sin firma digital es rechazada en producción (falla
+     intencional), mientras una firmada se descarga sin problema
+     (éxito).
+  4) Un pod real de Kubernetes descarga una imagen usando una
+     credencial de robot de solo lectura (éxito end-to-end).
+
+POSIBLES FALLOS QUE PUEDEN APARECER (no son errores tuyos, son del
+comportamiento real del cluster bajo carga):
+  - Comandos lentos o "no route to host" justo después de encender
+    las VMs: el cluster necesita unos minutos para estabilizarse.
+  - Un nodo worker puede aparecer NotReady si la VM se congeló.
+  - Harbor puede responder 502 si harbor-core se está reconectando
+    a la base de datos tras un reinicio reciente.
+  - El escaneo de una imagen nueva (no usada antes) puede tardar
+    1-3 minutos; por eso la demo usa solo imágenes YA escaneadas.
+  - El webhook depende de un sitio externo (webhook.site); si no hay
+    internet en el salón, ese bloque se omite y se explica por qué.
+
+REGLA DE ORO: si algo falla, no lo ocultes. Dilo en voz alta y
+explica qué está pasando; es evidencia de que entiendes el sistema.
+
+
+----------------------------------------------------------------
+CREDENCIALES DE LOS USUARIOS (usuario / contraseña)
+----------------------------------------------------------------
+admin      -> 123qwe
+dev1       -> Dev1-Pass-2026!
+ops1       -> Ops1-Pass-2026!
+auditor1   -> Audit1-Pass-2026!    
+
+
+----------------------------------------------------------------
+PASO 0 — CHEQUEO PREVIO (hazlo 5-10 min antes de tu turno, no en vivo)
+----------------------------------------------------------------
+uptime
+free -h
+kubectl get nodes
+kubectl get pods -n harbor
+kubectl get pods -n metallb-system
+
+
+----------------------------------------------------------------
+BLOQUE 1 — EL CLUSTER ES REAL (decirlo mientras corre)
+----------------------------------------------------------------
+kubectl get nodes -o wide
+kubectl get pods -n harbor
+kubectl get svc -n harbor harbor
+
+----------------------------------------------------------------
+BLOQUE 2 — CASO DE FALLA: bloqueo por vulnerabilidades
+----------------------------------------------------------------
+
+--- Paso 2.1: subir la imagen (esto SI debe funcionar) ---
+podman login harbor.lab.local -u ops1
+podman pull docker.io/library/nginx:1.16
+podman tag docker.io/library/nginx:1.16 harbor.lab.local/staging/nginx:1.16
+podman push harbor.lab.local/staging/nginx:1.16
+podman logout harbor.lab.local
+
+
+--- Paso 2.2: mostrar el escaneo (en el navegador) ---
+Ir a: Projects > staging > nginx > Artifacts
+
+--- Paso 2.3: LA FALLA REAL — el pull bloqueado ---
+podman login harbor.lab.local -u dev1
+podman rmi harbor.lab.local/staging/nginx:1.16
+podman pull harbor.lab.local/staging/nginx:1.16
+
+(el error dira algo como:
+"cannot be pulled due to configured policy in 'Prevent images with
+vulnerability severity of High or higher...'")
+
+
+----------------------------------------------------------------
+BLOQUE 3 — CASO DE EXITO: el contraste con "desarrollo"
+----------------------------------------------------------------
+podman logout harbor.lab.local
+podman login harbor.lab.local -u dev1
+podman pull docker.io/library/nginx:1.16
+podman tag docker.io/library/nginx:1.16 harbor.lab.local/desarrollo/nginx:1.16
+podman push harbor.lab.local/desarrollo/nginx:1.16
+podman rmi harbor.lab.local/desarrollo/nginx:1.16
+podman pull harbor.lab.local/desarrollo/nginx:1.16
+
+
+
+----------------------------------------------------------------
+BLOQUE 4 — FIRMA CON COSIGN: exito y falla en la misma pieza
+----------------------------------------------------------------
+podman logout harbor.lab.local
+podman login harbor.lab.local -u dev1
+
+--- Exito: imagen firmada ---
+podman pull harbor.lab.local/produccion/hello-world:latest
+
+--- Falla: imagen sin firmar ---
+podman pull harbor.lab.local/produccion/alpine:3.20
+
+
+----------------------------------------------------------------
+BLOQUE 5 — KUBERNETES CONSUMIENDO DEL REGISTRY (exito end-to-end)
+----------------------------------------------------------------
+kubectl delete pod test-harbor-pull --ignore-not-found
+kubectl apply -f /tmp/pod-test-harbor.yaml
+kubectl get pod test-harbor-pull -w
+
+(presionar Ctrl+C en cuanto aparezca "Completed")
+
+
+----------------------------------------------------------------
+BLOQUE 6 — TRAZABILIDAD EN VIVO (opcional, si sobra tiempo)
+----------------------------------------------------------------
+podman logout harbor.lab.local
+podman login harbor.lab.local -u ops1
+podman tag docker.io/library/alpine:3.20 harbor.lab.local/produccion/alpine:demo
+podman push harbor.lab.local/produccion/alpine:demo
+
+Cambiar a la pestana de webhook.site (dejarla abierta desde antes).
+
+
+================================================================
+ PLAN B — QUE HACER SI ALGO FALLA EN VIVO
+================================================================
+
+PROBLEMA: comando lento o "no route to host"
+CAUSA: el cluster no tuvo tiempo de estabilizarse
+QUE HACER: decir "el cluster acaba de recibir carga, démosle un
+  segundo" y ejecutar "kubectl get nodes" mientras esperas 10-15 seg
+
+PROBLEMA: un worker aparece NotReady
+CAUSA: la VM se congelo
+QUE HACER: tener una segunda ventana lista con acceso al
+  hipervisor para reiniciar esa VM sin salir del tema; mientras,
+  seguir con otro bloque que no dependa de ese nodo
+
+PROBLEMA: harbor.lab.local no responde (502 o timeout)
+CAUSA: harbor-core reconectando tras carga reciente
+QUE HACER: tener una pestana de navegador ya abierta apuntando a
+  Harbor para no perder tiempo escribiendo la URL; si persiste,
+  mostrar el archivo /tmp/prueba-bloqueo-vulnerabilidad.txt como
+  evidencia de que ya funciono antes
+
+PROBLEMA: el escaneo de una imagen tarda mucho
+CAUSA: Trivy necesita tiempo real de escaneo
+QUE HACER: no subir una imagen nueva sin escanear durante el
+  examen; usar solo las ya escaneadas (nginx:1.16, alpine:3.20,
+  hello-world)
+
+PROBLEMA: el webhook no muestra nada en webhook.site
+CAUSA: la pestana expiro o se perdio la URL
+QUE HACER: tener guardada la URL en un archivo aparte, y una
+  captura de una notificacion previa como respaldo.
+Abre una pestaña nueva en tu navegador y entra a https://webhook.site
+Haz clic en New Webhook.
+Llena el formulario:
+Name: notificacion-eventos
+Notify Type: HTTP
+Endpoint URL: pega la URL que copiaste de webhook.site
+Event Type: marca al menos Pushing artifact y Scanning completed
+
+PROBLEMA: se corta el internet del salon
+CAUSA: --
+QUE HACER: todo lo esencial corre DENTRO del cluster, sin depender
+  de internet externo, salvo el Bloque 6 (webhook.site); si falta
+  internet, omitir ese bloque y decirlo abiertamente
+
+PROBLEMA: no recuerdas con que usuario estas logueado
+CAUSA: --
+QUE HACER: "podman logout harbor.lab.local" antes de cada bloque
+  nuevo es el reinicio seguro; ya esta incluido en cada transicion
+  de este guion

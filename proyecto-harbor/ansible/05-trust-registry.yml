@@ -1,0 +1,39 @@
+---
+- name: Confianza en Harbor para todos los nodos
+  hosts: k8s
+  become: true
+
+  tasks:
+    - name: Directorio certs.d para el dominio de Harbor
+      ansible.builtin.file:
+        path: "/etc/containerd/certs.d/{{ harbor_domain }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copiar la CA a cada nodo
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/lab-ca.crt"
+        dest: "/etc/containerd/certs.d/{{ harbor_domain }}/ca.crt"
+        mode: "0644"
+
+    - name: hosts.toml para containerd
+      ansible.builtin.copy:
+        dest: "/etc/containerd/certs.d/{{ harbor_domain }}/hosts.toml"
+        mode: "0644"
+        content: |
+          server = "https://{{ harbor_domain }}"
+
+          [host."https://{{ harbor_domain }}"]
+            capabilities = ["pull", "resolve"]
+            ca = "/etc/containerd/certs.d/{{ harbor_domain }}/ca.crt"
+
+    - name: CA en el almacén de confianza del sistema operativo
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/lab-ca.crt"
+        dest: /etc/pki/ca-trust/source/anchors/harbor-lab-ca.crt
+        mode: "0644"
+      notify: actualizar ca-trust
+
+  handlers:
+    - name: actualizar ca-trust
+      ansible.builtin.command: update-ca-trust
